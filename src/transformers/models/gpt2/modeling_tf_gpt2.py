@@ -40,7 +40,7 @@ from ...modeling_tf_utils import (
     keras_serializable,
     unpack_inputs,
 )
-from ...tf_utils import shape_list
+from ...tf_utils import shape_list, stable_softmax
 from ...utils import (
     DUMMY_INPUTS,
     ModelOutput,
@@ -129,7 +129,7 @@ class TFAttention(tf.keras.layers.Layer):
             attention_mask = tf.cast(attention_mask, dtype=w.dtype)
             w = w + attention_mask
 
-        w = tf.nn.softmax(w, axis=-1)
+        w = stable_softmax(w, axis=-1)
         w = self.attn_dropout(w, training=training)
 
         # Mask heads if we want to
@@ -813,25 +813,21 @@ class TFGPT2LMHeadModel(TFGPT2PreTrainedModel, TFCausalLanguageModelingLoss):
     def set_output_embeddings(self, value):
         self.set_input_embeddings(value)
 
-    def prepare_inputs_for_generation(self, inputs, past=None, use_cache=None, use_xla=False, **kwargs):
-        # TODO: (Joao) after the TF generator is complete, update GPT2 TF generation to match PT's. NB -- some GPT2
-        # tests will need to be fixed after the change
-
+    def prepare_inputs_for_generation(self, inputs, past=None, use_cache=None, **kwargs):
+        token_type_ids = kwargs.get("token_type_ids", None)
         # only last token for inputs_ids if past is defined in kwargs
         if past:
             inputs = tf.expand_dims(inputs[:, -1], -1)
+            if token_type_ids is not None:
+                token_type_ids = tf.expand_dims(token_type_ids[:, -1], -1)
 
-        # TODO(pvp, Joao) - this `if use_xla` statement can be removed, but is left
-        # for a future PR to not change too many things for now.
-        # All statements in this if case apply for both xla and non-xla (as they already do in PyTorch)
-        position_ids = None
-        attention_mask = None
-        if use_xla:
-            attention_mask = kwargs.get("attention_mask", None)
-            if past is not None and attention_mask is not None:
-                position_ids = tf.reduce_sum(attention_mask, axis=1, keepdims=True) - 1
-            elif attention_mask is not None:
-                position_ids = tf.math.cumsum(attention_mask, axis=1, exclusive=True)
+        position_ids = kwargs.get("position_ids", None)
+        attention_mask = kwargs.get("attention_mask", None)
+
+        if attention_mask is not None and position_ids is None:
+            position_ids = tf.math.cumsum(attention_mask, axis=-1, exclusive=True)
+            if past:
+                position_ids = tf.expand_dims(position_ids[:, -1], -1)
 
         return {
             "input_ids": inputs,
@@ -839,6 +835,7 @@ class TFGPT2LMHeadModel(TFGPT2PreTrainedModel, TFCausalLanguageModelingLoss):
             "position_ids": position_ids,
             "past": past,
             "use_cache": use_cache,
+            "token_type_ids": token_type_ids,
         }
 
     def _update_model_kwargs_for_xla_generation(self, outputs, model_kwargs, current_pos, max_length):
@@ -1061,7 +1058,7 @@ class TFGPT2DoubleHeadsModel(TFGPT2PreTrainedModel):
 
         >>> embedding_layer = model.resize_token_embeddings(
         ...     len(tokenizer)
-        >>> )  # Update the model embeddings with the new vocabulary size
+        ... )  # Update the model embeddings with the new vocabulary size
 
         >>> choices = ["Hello, my dog is cute [CLS]", "Hello, my cat is cute [CLS]"]
         >>> encoded_choices = [tokenizer.encode(s) for s in choices]
@@ -1240,7 +1237,7 @@ class TFGPT2ForSequenceClassification(TFGPT2PreTrainedModel, TFSequenceClassific
                 sequence_lengths = -1
                 logger.warning(
                     f"{self.__class__.__name__} will not detect padding tokens in `inputs_embeds`. Results may be "
-                    f"unexpected if using padding tokens in conjunction with `inputs_embeds.`"
+                    "unexpected if using padding tokens in conjunction with `inputs_embeds.`"
                 )
         loss = None
 

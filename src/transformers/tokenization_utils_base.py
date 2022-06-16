@@ -24,6 +24,7 @@ import os
 import re
 import warnings
 from collections import OrderedDict, UserDict
+from collections.abc import Mapping
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Dict, List, NamedTuple, Optional, Sequence, Tuple, Union
@@ -1501,12 +1502,12 @@ class PreTrainedTokenizerBase(SpecialTokensMixin, PushToHubMixin):
         if value == self.model_max_length - self.num_special_tokens_to_add(pair=False) and self.verbose:
             if not self.deprecation_warnings.get("max_len_single_sentence", False):
                 logger.warning(
-                    "Setting 'max_len_single_sentence' is now deprecated. " "This value is automatically set up."
+                    "Setting 'max_len_single_sentence' is now deprecated. This value is automatically set up."
                 )
             self.deprecation_warnings["max_len_single_sentence"] = True
         else:
             raise ValueError(
-                "Setting 'max_len_single_sentence' is now deprecated. " "This value is automatically set up."
+                "Setting 'max_len_single_sentence' is now deprecated. This value is automatically set up."
             )
 
     @max_len_sentences_pair.setter
@@ -1515,13 +1516,11 @@ class PreTrainedTokenizerBase(SpecialTokensMixin, PushToHubMixin):
         if value == self.model_max_length - self.num_special_tokens_to_add(pair=True) and self.verbose:
             if not self.deprecation_warnings.get("max_len_sentences_pair", False):
                 logger.warning(
-                    "Setting 'max_len_sentences_pair' is now deprecated. " "This value is automatically set up."
+                    "Setting 'max_len_sentences_pair' is now deprecated. This value is automatically set up."
                 )
             self.deprecation_warnings["max_len_sentences_pair"] = True
         else:
-            raise ValueError(
-                "Setting 'max_len_sentences_pair' is now deprecated. " "This value is automatically set up."
-            )
+            raise ValueError("Setting 'max_len_sentences_pair' is now deprecated. This value is automatically set up.")
 
     def _set_processor_class(self, processor_class: str):
         """Sets processor class as an attribute."""
@@ -1529,9 +1528,10 @@ class PreTrainedTokenizerBase(SpecialTokensMixin, PushToHubMixin):
 
     def __repr__(self) -> str:
         return (
-            f"{'PreTrainedTokenizerFast' if self.is_fast else 'PreTrainedTokenizer'}(name_or_path='{self.name_or_path}', "
-            f"vocab_size={self.vocab_size}, model_max_len={self.model_max_length}, is_fast={self.is_fast}, "
-            f"padding_side='{self.padding_side}', truncation_side='{self.truncation_side}', special_tokens={self.special_tokens_map_extended})"
+            f"{'PreTrainedTokenizerFast' if self.is_fast else 'PreTrainedTokenizer'}(name_or_path='{self.name_or_path}',"
+            f" vocab_size={self.vocab_size}, model_max_len={self.model_max_length}, is_fast={self.is_fast},"
+            f" padding_side='{self.padding_side}', truncation_side='{self.truncation_side}',"
+            f" special_tokens={self.special_tokens_map_extended})"
         )
 
     def get_vocab(self) -> Dict[str, int]:
@@ -1872,10 +1872,10 @@ class PreTrainedTokenizerBase(SpecialTokensMixin, PushToHubMixin):
         if config_tokenizer_class is not None:
             if cls.__name__.replace("Fast", "") != config_tokenizer_class.replace("Fast", ""):
                 logger.warning(
-                    "The tokenizer class you load from this checkpoint is not the same type as the class this function is called from. "
-                    "It may result in unexpected tokenization. \n"
-                    f"The tokenizer class you load from this checkpoint is '{config_tokenizer_class}'. \n"
-                    f"The class this function is called from is '{cls.__name__}'."
+                    "The tokenizer class you load from this checkpoint is not the same type as the class this"
+                    " function is called from. It may result in unexpected tokenization. \nThe tokenizer class you"
+                    f" load from this checkpoint is '{config_tokenizer_class}'. \nThe class this function is called"
+                    f" from is '{cls.__name__}'."
                 )
 
         # Update with newly provided kwargs
@@ -1898,9 +1898,19 @@ class PreTrainedTokenizerBase(SpecialTokensMixin, PushToHubMixin):
         if pretrained_model_name_or_path in cls.max_model_input_sizes:
             # if we're using a pretrained model, ensure the tokenizer
             # wont index sequences longer than the number of positional embeddings
+
             model_max_length = cls.max_model_input_sizes[pretrained_model_name_or_path]
             if model_max_length is not None and isinstance(model_max_length, (int, float)):
-                init_kwargs["model_max_length"] = min(init_kwargs.get("model_max_length", int(1e30)), model_max_length)
+
+                model_max_length = min(init_kwargs.get("model_max_length", int(1e30)), model_max_length)
+                # TODO(PVP) - uncomment following line in Transformers v5
+                # init_kwargs["model_max_length"] = model_max_length
+                # TODO(PVP) - remove in Transformers v5
+                # ---
+                init_kwargs["model_max_length"] = cls._eventually_correct_t5_max_length(
+                    pretrained_model_name_or_path, model_max_length, init_kwargs.get("model_max_length")
+                )
+                # ---
 
         # Merge resolved_vocab_files arguments in init_kwargs.
         added_tokens_file = resolved_vocab_files.pop("added_tokens_file", None)
@@ -1954,33 +1964,56 @@ class PreTrainedTokenizerBase(SpecialTokensMixin, PushToHubMixin):
             # Sort added tokens by index
             added_tok_encoder_sorted = list(sorted(added_tok_encoder.items(), key=lambda x: x[1]))
 
+            # Accumulate added tokens into batches of special/non-special tokens, because calling add_tokens() for
+            # individual tokens would repeatedly rebuild a trie, which can be slow.
+            is_last_special = None
+            tokens = []
+
             for token, index in added_tok_encoder_sorted:
-                if has_tokenizer_file and index != len(tokenizer) and tokenizer.convert_tokens_to_ids(token) != index:
+                current_index = len(tokenizer) + len(tokens)
+                if has_tokenizer_file and index != current_index and tokenizer.convert_tokens_to_ids(token) != index:
                     # Tokenizer fast: added token needs to either be in the vocabulary with the proper index or the
                     # index is the current length of the tokenizer (not in vocabulary)
                     raise ValueError(
                         f"Wrong index found for {token}: should be {tokenizer.convert_tokens_to_ids(token)} but found "
                         f"{index}."
                     )
-                elif not has_tokenizer_file and index != len(tokenizer):
+                elif not has_tokenizer_file and index != current_index:
                     # Tokenizer slow: added token cannot already be in the vocabulary so its index needs to be the
                     # current length of the tokenizer.
                     raise ValueError(
                         f"Non-consecutive added token '{token}' found. "
-                        f"Should have index {len(tokenizer)} but has index {index} in saved vocabulary."
+                        f"Should have index {current_index} but has index {index} in saved vocabulary."
                     )
 
-                # Safe to call on a tokenizer fast even if token already there.
-                tokenizer.add_tokens(token, special_tokens=bool(token in special_tokens))
+                is_special = bool(token in special_tokens)
+                if is_last_special is None or is_last_special == is_special:
+                    tokens.append(token)
+                else:
+                    tokenizer.add_tokens(tokens, special_tokens=is_last_special)
+                    tokens = [token]
+                is_last_special = is_special
+
+            if tokens:
+                tokenizer.add_tokens(tokens, special_tokens=is_last_special)
 
         # Check all our special tokens are registered as "no split" token (we don't cut them) and are in the vocab
         added_tokens = tokenizer.sanitize_special_tokens()
         if added_tokens:
             logger.warning_advice(
-                "Special tokens have been added in the vocabulary, make sure the associated word embeddings are fine-tuned or trained."
+                "Special tokens have been added in the vocabulary, make sure the associated word embeddings are"
+                " fine-tuned or trained."
             )
 
         return tokenizer
+
+    @staticmethod
+    def _eventually_correct_t5_max_length(pretrained_model_name_or_path, max_model_length, init_max_model_length):
+        # This method should be deleted in Transformers v5
+        # Its only purpose is to potentially throw a warning
+        # that incorrectly defined max lengths of T5's tokenizer are used
+        # which we will correct in Transformers v5.
+        return max_model_length
 
     def save_pretrained(
         self,
@@ -2085,13 +2118,15 @@ class PreTrainedTokenizerBase(SpecialTokensMixin, PushToHubMixin):
             custom_object_save(self, save_directory, config=tokenizer_config)
 
         with open(tokenizer_config_file, "w", encoding="utf-8") as f:
-            f.write(json.dumps(tokenizer_config, ensure_ascii=False))
+            out_str = json.dumps(tokenizer_config, indent=2, sort_keys=True, ensure_ascii=False) + "\n"
+            f.write(out_str)
         logger.info(f"tokenizer config file saved in {tokenizer_config_file}")
 
         # Sanitize AddedTokens in special_tokens_map
         write_dict = convert_added_tokens(self.special_tokens_map_extended, add_type_field=False)
         with open(special_tokens_map_file, "w", encoding="utf-8") as f:
-            f.write(json.dumps(write_dict, ensure_ascii=False))
+            out_str = json.dumps(write_dict, indent=2, sort_keys=True, ensure_ascii=False) + "\n"
+            f.write(out_str)
         logger.info(f"Special tokens file saved in {special_tokens_map_file}")
 
         file_names = (tokenizer_config_file, special_tokens_map_file)
@@ -2135,7 +2170,7 @@ class PreTrainedTokenizerBase(SpecialTokensMixin, PushToHubMixin):
         added_vocab = self.get_added_vocab()
         if added_vocab:
             with open(added_tokens_file, "w", encoding="utf-8") as f:
-                out_str = json.dumps(added_vocab, ensure_ascii=False)
+                out_str = json.dumps(added_vocab, indent=2, sort_keys=True, ensure_ascii=False) + "\n"
                 f.write(out_str)
                 logger.info(f"added tokens file saved in {added_tokens_file}")
 
@@ -2251,11 +2286,11 @@ class PreTrainedTokenizerBase(SpecialTokensMixin, PushToHubMixin):
             if verbose:
                 if not self.deprecation_warnings.get("Truncation-not-explicitly-activated", False):
                     logger.warning(
-                        "Truncation was not explicitly activated but `max_length` is provided a specific value, "
-                        "please use `truncation=True` to explicitly truncate examples to max length. "
-                        "Defaulting to 'longest_first' truncation strategy. "
-                        "If you encode pairs of sequences (GLUE-style) with the tokenizer you can select this strategy "
-                        "more precisely by providing a specific strategy to `truncation`."
+                        "Truncation was not explicitly activated but `max_length` is provided a specific value, please"
+                        " use `truncation=True` to explicitly truncate examples to max length. Defaulting to"
+                        " 'longest_first' truncation strategy. If you encode pairs of sequences (GLUE-style) with the"
+                        " tokenizer you can select this strategy more precisely by providing a specific strategy to"
+                        " `truncation`."
                     )
                 self.deprecation_warnings["Truncation-not-explicitly-activated"] = True
             truncation = "longest_first"
@@ -2297,14 +2332,14 @@ class PreTrainedTokenizerBase(SpecialTokensMixin, PushToHubMixin):
         if truncation is False and old_truncation_strategy != "do_not_truncate":
             if verbose:
                 warnings.warn(
-                    "The `truncation_strategy` argument is deprecated and will be removed in a future version, "
-                    "use `truncation=True` to truncate examples to a max length. You can give a specific "
-                    "length with `max_length` (e.g. `max_length=45`) or leave max_length to None to truncate to the "
-                    "maximal input size of the model (e.g. 512 for Bert). "
-                    " If you have pairs of inputs, you can give a specific truncation strategy selected among "
-                    "`truncation='only_first'` (will only truncate the first sentence in the pairs) "
-                    "`truncation='only_second'` (will only truncate the second sentence in the pairs) "
-                    "or `truncation='longest_first'` (will iteratively remove tokens from the longest sentence in the pairs).",
+                    "The `truncation_strategy` argument is deprecated and will be removed in a future version, use"
+                    " `truncation=True` to truncate examples to a max length. You can give a specific length with"
+                    " `max_length` (e.g. `max_length=45`) or leave max_length to None to truncate to the maximal input"
+                    " size of the model (e.g. 512 for Bert).  If you have pairs of inputs, you can give a specific"
+                    " truncation strategy selected among `truncation='only_first'` (will only truncate the first"
+                    " sentence in the pairs) `truncation='only_second'` (will only truncate the second sentence in the"
+                    " pairs) or `truncation='longest_first'` (will iteratively remove tokens from the longest sentence"
+                    " in the pairs).",
                     FutureWarning,
                 )
             truncation_strategy = TruncationStrategy(old_truncation_strategy)
@@ -2327,8 +2362,8 @@ class PreTrainedTokenizerBase(SpecialTokensMixin, PushToHubMixin):
                     if verbose:
                         if not self.deprecation_warnings.get("Asking-to-pad-to-max_length", False):
                             logger.warning(
-                                "Asking to pad to max_length but no maximum length is provided and the model has no predefined maximum length. "
-                                "Default to no padding."
+                                "Asking to pad to max_length but no maximum length is provided and the model has no"
+                                " predefined maximum length. Default to no padding."
                             )
                         self.deprecation_warnings["Asking-to-pad-to-max_length"] = True
                     padding_strategy = PaddingStrategy.DO_NOT_PAD
@@ -2340,8 +2375,8 @@ class PreTrainedTokenizerBase(SpecialTokensMixin, PushToHubMixin):
                     if verbose:
                         if not self.deprecation_warnings.get("Asking-to-truncate-to-max_length", False):
                             logger.warning(
-                                "Asking to truncate to max_length but no maximum length is provided and the model has no predefined maximum length. "
-                                "Default to no truncation."
+                                "Asking to truncate to max_length but no maximum length is provided and the model has"
+                                " no predefined maximum length. Default to no truncation."
                             )
                         self.deprecation_warnings["Asking-to-truncate-to-max_length"] = True
                     truncation_strategy = TruncationStrategy.DO_NOT_TRUNCATE
@@ -2365,7 +2400,7 @@ class PreTrainedTokenizerBase(SpecialTokensMixin, PushToHubMixin):
             and (max_length % pad_to_multiple_of != 0)
         ):
             raise ValueError(
-                f"Truncation and padding are both activated but "
+                "Truncation and padding are both activated but "
                 f"truncation length ({max_length}) is not a multiple of pad_to_multiple_of ({pad_to_multiple_of})."
             )
 
@@ -2448,11 +2483,13 @@ class PreTrainedTokenizerBase(SpecialTokensMixin, PushToHubMixin):
         if is_batched:
             if isinstance(text_pair, str):
                 raise TypeError(
-                    "when tokenizing batches of text, `text_pair` must be a list or tuple with the same length as `text`."
+                    "when tokenizing batches of text, `text_pair` must be a list or tuple with the same length as"
+                    " `text`."
                 )
             if text_pair is not None and len(text) != len(text_pair):
                 raise ValueError(
-                    f"batch length of `text`: {len(text)} does not match batch length of `text_pair`: {len(text_pair)}."
+                    f"batch length of `text`: {len(text)} does not match batch length of `text_pair`:"
+                    f" {len(text_pair)}."
                 )
             batch_text_or_text_pairs = list(zip(text, text_pair)) if text_pair is not None else text
             return self.batch_encode_plus(
@@ -2768,7 +2805,7 @@ class PreTrainedTokenizerBase(SpecialTokensMixin, PushToHubMixin):
         """
         # If we have a list of dicts, let's convert it in a dict of lists
         # We do this to allow using this method as a collate_fn function in PyTorch Dataloader
-        if isinstance(encoded_inputs, (list, tuple)) and isinstance(encoded_inputs[0], (dict, BatchEncoding)):
+        if isinstance(encoded_inputs, (list, tuple)) and isinstance(encoded_inputs[0], Mapping):
             encoded_inputs = {key: [example[key] for example in encoded_inputs] for key in encoded_inputs[0].keys()}
 
         # The model's main input name, usually `input_ids`, has be passed for padding
@@ -2807,7 +2844,7 @@ class PreTrainedTokenizerBase(SpecialTokensMixin, PushToHubMixin):
             else:
                 raise ValueError(
                     f"type of {first_element} unknown: {type(first_element)}. "
-                    f"Should be one of a python, numpy, pytorch or tensorflow object."
+                    "Should be one of a python, numpy, pytorch or tensorflow object."
                 )
 
             for key, value in encoded_inputs.items():
@@ -3104,16 +3141,17 @@ class PreTrainedTokenizerBase(SpecialTokensMixin, PushToHubMixin):
                 )
                 if truncation_strategy == TruncationStrategy.ONLY_FIRST:
                     error_msg = (
-                        error_msg + "Please select another truncation strategy than "
+                        error_msg
+                        + "Please select another truncation strategy than "
                         f"{truncation_strategy}, for instance 'longest_first' or 'only_second'."
                     )
                 logger.error(error_msg)
         elif truncation_strategy == TruncationStrategy.LONGEST_FIRST:
             logger.warning(
-                f"Be aware, overflowing tokens are not returned for the setting you have chosen,"
+                "Be aware, overflowing tokens are not returned for the setting you have chosen,"
                 f" i.e. sequence pairs with the '{TruncationStrategy.LONGEST_FIRST.value}' "
-                f"truncation strategy. So the returned list will always be empty even if some "
-                f"tokens have been removed."
+                "truncation strategy. So the returned list will always be empty even if some "
+                "tokens have been removed."
             )
             for _ in range(num_tokens_to_remove):
                 if pair_ids is None or len(ids) > len(pair_ids):
@@ -3146,7 +3184,7 @@ class PreTrainedTokenizerBase(SpecialTokensMixin, PushToHubMixin):
                     f"We need to remove {num_tokens_to_remove} to truncate the input "
                     f"but the second sequence has a length {len(pair_ids)}. "
                     f"Please select another truncation strategy than {truncation_strategy}, "
-                    f"for instance 'longest_first' or 'only_first'."
+                    "for instance 'longest_first' or 'only_first'."
                 )
 
         return (ids, pair_ids, overflowing_tokens)

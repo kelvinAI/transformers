@@ -41,6 +41,12 @@ from .configuration_vilt import ViltConfig
 
 logger = logging.get_logger(__name__)
 
+if torch.__version__ < (1, 10, 0):
+    logger.warning(
+        f"You are using torch=={torch.__version__}, but torch>=1.10.0 is required to use "
+        "ViltModel. Please upgrade torch."
+    )
+
 _CONFIG_FOR_DOC = "ViltConfig"
 _CHECKPOINT_FOR_DOC = "dandelin/vilt-b32-mlm"
 
@@ -843,7 +849,7 @@ class ViltModel(ViltPreTrainedModel):
 
         # We can provide a self-attention mask of dimensions [batch_size, from_seq_length, to_seq_length]
         # ourselves in which case we just need to make it broadcastable to all heads.
-        extended_attention_mask: torch.Tensor = self.get_extended_attention_mask(attention_mask, input_shape, device)
+        extended_attention_mask: torch.Tensor = self.get_extended_attention_mask(attention_mask, input_shape)
 
         encoder_outputs = self.encoder(
             embedding_output,
